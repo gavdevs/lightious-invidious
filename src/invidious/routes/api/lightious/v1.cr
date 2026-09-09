@@ -1,7 +1,10 @@
 module Invidious::Routes::API::Lightious::V1
   extend self
 
-  MAX_JSON_BODY_BYTES = 4096
+  MAX_JSON_BODY_BYTES            = 4096
+  MAX_CHANNEL_SEARCH_QUERY_BYTES =  256
+  MAX_CHANNEL_SEARCH_PAGE        =   50
+  CHANNEL_SEARCH_PAGE_SIZE       =   20
 
   def create_pairing(env)
     prepare_json(env)
@@ -407,6 +410,75 @@ module Invidious::Routes::API::Lightious::V1
           end
         end
         json.field "continuation", protected_continuation if protected_continuation
+      end
+    end
+  end
+
+  def channel_search(env)
+    prepare_json(env)
+    device, profile = authenticated_context(env)
+    return invalid_device(env) unless device && profile
+
+    ucid = env.params.url["ucid"]
+    return error_json(400, "Invalid channel ID.") unless valid_channel_id?(ucid)
+
+    if profile.mode == "focused" &&
+       !Invidious::Database::Lightious.channel_policy_for(profile.id, ucid)
+      return error_json(403, "This channel is not in the Focused library.")
+    end
+
+    query_text = env.params.query["q"]?.to_s.strip
+    return error_json(400, "Enter a channel search query.") if query_text.empty?
+    if query_text.bytesize > MAX_CHANNEL_SEARCH_QUERY_BYTES
+      return error_json(400, "That channel search is too long.")
+    end
+
+    page_value = env.params.query["page"]?
+    page = page_value ? page_value.to_i? : 1
+    return error_json(400, "Invalid channel search page.") unless page
+    unless page.in?(1..MAX_CHANNEL_SEARCH_PAGE)
+      return error_json(400, "Invalid channel search page.")
+    end
+
+    region = env.params.query["region"]?
+    params = HTTP::Params.new({
+      "q"    => [query_text],
+      "page" => [page.to_s],
+    })
+    query = Invidious::Search::Query.new(
+      params,
+      Invidious::Search::Query::Type::Channel,
+      region,
+    )
+    query.channel = ucid
+
+    begin
+      raw_results = Invidious::Search::Processors.channel(query)
+    rescue ex
+      return error_json(400, ex)
+    end
+
+    blocked_video_ids = Invidious::Database::Lightious.blocked_video_ids_for_profile(profile.id)
+    entries = raw_results.compact_map do |item|
+      next unless item.is_a?(SearchVideo)
+      next unless item.ucid == ucid
+      next if blocked_video_ids.includes?(item.id)
+      next if Invidious::Lightious::ShortsPolicy.short?(item)
+
+      channel_feed_entry(item)
+    end
+    next_page = page + 1 if raw_results.size >= CHANNEL_SEARCH_PAGE_SIZE && page < MAX_CHANNEL_SEARCH_PAGE
+
+    Invidious::Database::Lightious.touch_device(device.id, Time.utc)
+    locale = env.get("preferences").as(Preferences).locale
+    JSON.build do |json|
+      json.object do
+        json.field "videos" do
+          json.array do
+            entries.each { |entry| write_channel_feed_entry(json, entry, locale) }
+          end
+        end
+        json.field "nextPage", next_page if next_page
       end
     end
   end

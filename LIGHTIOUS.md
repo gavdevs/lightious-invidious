@@ -167,6 +167,11 @@ The first vertical slice is revisioned and intentionally small:
   server-signed continuation bound to that device and channel, so a raw
   continuation from another channel cannot bypass the path policy. The normal
   `hl` query parameter controls localized fields such as `publishedText`.
+- `GET /api/lightious/v1/channels/:ucid/search` is also device-gated and, in
+  Focused mode, is limited to explicitly allowed whole channels. It accepts a
+  bounded query and page number, searches the channel's full catalog, removes
+  Shorts, blocked video IDs, and wrong-channel results, and returns at most 50
+  pages without exposing an upstream continuation token.
 - `GET /api/lightious/v1/videos/:id` is device-gated and returns playback
   metadata only when Focused policy permits that exact video or its whole
   channel. An exact-video policy overrides the channel default.
@@ -249,9 +254,10 @@ list as unsupported and may refetch metadata after a source expires.
    playlist destinations, playlist search, and channel browsing across uploads,
    livestreams, and channel-local search. Shorts are explicitly excluded.
    **Implemented; the companion never links to a player.**
-5. Focused Videos, Channels, and Playlists phone views with policy filters,
-   unified local library search, native-aspect video, fullscreen playback, and
-   paginated whole-channel uploads and streams. Shorts are explicitly excluded.
+5. Focused Videos, Channels, and Playlists phone views with compact policy
+   filters, unified local library search, full-catalog channel search,
+   player-style audio, native-aspect video, fullscreen playback, and paginated
+   whole-channel uploads and streams. Shorts are explicitly excluded.
    **Implemented in the Kotlin client and paired server API.**
 6. Optional custom-instance provider.
 

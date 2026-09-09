@@ -376,6 +376,7 @@ module Invidious::Routing
     get "/api/lightious/v1/popular", Routes::API::Lightious::V1, :popular
     get "/api/lightious/v1/search", Routes::API::Lightious::V1, :search
     get "/api/lightious/v1/channels/:ucid/videos", Routes::API::Lightious::V1, :channel_videos
+    get "/api/lightious/v1/channels/:ucid/search", Routes::API::Lightious::V1, :channel_search
     get "/api/lightious/v1/videos/:id", Routes::API::Lightious::V1, :video
     get "/api/lightious/v1/media", Routes::API::Lightious::V1, :media
     options "/api/lightious/v1/media", Routes::API::Lightious::V1, :media_options

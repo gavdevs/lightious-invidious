@@ -70,6 +70,7 @@ Spectator.describe Invidious::Lightious::DeviceAuthorization do
         "/api/lightious/v1/history",
         "/api/lightious/v1/videos/dQw4w9WgXcQ",
         "/api/lightious/v1/channels/UC_x5XG1OV2P6uZZ5FSM9Ttw/videos",
+        "/api/lightious/v1/channels/UC_x5XG1OV2P6uZZ5FSM9Ttw/search",
         "/api/lightious/v1/future-endpoint",
       }
 
