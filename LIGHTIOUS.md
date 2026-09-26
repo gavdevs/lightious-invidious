@@ -45,14 +45,34 @@ detail pages provide scoped search and selection without exposing a web player.
 
 ## Product modes
 
-New profiles start in **Focused** mode. Existing profiles keep their chosen
-mode unless the user changes it from the companion website.
+New profiles start in **Focused** mode. The companion offers two curated
+experiences; the former unrestricted Explore mode is migrated to Library.
 
-- **Explore** preserves the current Lightious experience: search, account feed,
-  local histories, and explicitly enabled pages.
-- **Focused** exposes only companion-managed entries. Search, Popular, account
-  feed, pasted links, and reopening unauthorized entries are denied by the
-  server rather than merely hidden by the client.
+- **Focused** shows a finite channel feed, newest release first, alongside
+  explicitly saved videos and playlists. Each saved channel contributes its
+  newest three eligible uploads/replays by default (configurable from one to
+  five). Channel archives and channel search are unavailable on the phone.
+- **Library** retains browsing and search within saved whole channels, alongside
+  saved videos and playlists. Neither mode exposes unrestricted discovery.
+
+The phone can hide videos manually marked watched from the Focused feed. The
+server chooses the recent release window first, and the phone filters explicit
+local completion afterwards, so older uploads never move in to replace watched
+ones. Old account history is not treated as explicit completion. The companion
+can disable hiding watched videos. These settings are revisioned with the
+profile and included in device sync as `channelFeedLimit` and `hideWatched`.
+
+The feed uses only the first uploads/streams source pages; it does not crawl the
+archive to fill gaps. Release dates use upstream metadata, which can be
+approximate; equal relative-date groups keep their source's newest-first order.
+For age-gated channel fallbacks, only the first five candidates per source are
+resolved for real publication metadata because playlist dates are synthetic.
+Missing metadata makes that channel retryable instead of inventing dates. Live
+broadcasts, upcoming premieres, Shorts, and known quarantined IDs are excluded. Channel metadata is cached for up to five minutes,
+with a maximum of 256 channels and 60 entries per channel. At most two channels
+are fetched concurrently for a feed request. A 60-second collection deadline
+returns successful channels and identifies failed or unfinished channels in
+`failedChannelIds`, so a partial failure is never presented as an empty library.
 
 Lightious has a hard no-Shorts rule in both modes. Shorts are removed from
 companion and phone search, channel views, feeds, playlists, libraries, and
@@ -62,15 +82,15 @@ is quarantined instead of returned. Sync may include its ID only in the
 non-display `blockedVideoIds` purge list so a phone can delete stale local
 history, cache, or downloads.
 
-Every focused video has one of two playback policies:
+Every curated video has one of two playback policies:
 
 - `listen_only`: the client may resolve and play audio, but must not construct
   a video playback source.
 - `watch_and_listen`: the client may offer both actions.
 
 An explicitly selected video grants access only to that video. An explicitly
-selected channel grants access to that channel's paginated uploads, subject to
-its default playback policy; an exact-video policy overrides the channel
+selected channel contributes recent releases in Focused and permits paginated
+browsing in Library, subject to its default playback policy; an exact-video policy overrides the channel
 default. The client verifies each video's canonical channel ID before exposing
 playback. Adding an individual video never creates channel access or makes its
 author appear in the Channels list.
@@ -155,35 +175,31 @@ The first vertical slice is revisioned and intentionally small:
   Top-level `items` contains only the main Videos library; each playlist embeds
   all of its items, including playlist-only videos. `blockedVideoIds` is a
   non-display list of quarantined Shorts that clients must purge locally.
-- `GET /api/lightious/v1/search`, `/popular`, and `/feed` are device-gated and
-  available only in Explore mode. The feed is loaded from the Invidious account
-  associated during pairing; the phone never needs a second API token.
-- `GET /api/lightious/v1/channels/:ucid/videos` is device-gated. Focused mode
-  permits it only for an explicitly selected whole channel. Each page combines
-  up to 30 newest entries from each of the channel's uploads and livestream
-  tabs (60 entries maximum), removes Shorts and duplicate video IDs, and orders
-  the result newest-first. Live and upcoming metadata wins when an entry
-  appears in both tabs. Pagination values carry both tab positions in an opaque,
-  server-signed continuation bound to that device and channel, so a raw
-  continuation from another channel cannot bypass the path policy. The normal
-  `hl` query parameter controls localized fields such as `publishedText`.
-- `GET /api/lightious/v1/channels/:ucid/search` is also device-gated and, in
-  Focused mode, is limited to explicitly allowed whole channels. It accepts a
-  bounded query and page number, searches the channel's full catalog, removes
-  Shorts, blocked video IDs, and wrong-channel results, and returns at most 50
-  pages without exposing an upstream continuation token.
+- `GET /api/lightious/v1/channel-feed` accepts the device bearer and returns
+  `{videos, failedChannelIds}` for saved channels. Videos include `published`
+  epoch seconds and `authorId`; there is no continuation. The fixed per-channel
+  window is selected before any explicit watched filtering on the phone.
+- `GET /api/lightious/v1/search`, `/popular`, `/feed`, and `/history` retain
+  device authentication but return 403. Unrestricted phone discovery and the
+  account-wide watched list are no longer offered.
+- `GET /api/lightious/v1/channels/:ucid/videos` is device-gated and available
+  only in Library mode for a saved whole channel. Each page combines up to 30
+  entries from each uploads/streams source, removes Shorts and duplicates, and
+  orders newest first. Signed continuations are bound to the device/channel.
+- `GET /api/lightious/v1/channels/:ucid/search` is also Library-only for saved
+  channels. It accepts a bounded query/page, searches the full catalog, and
+  removes Shorts, blocked IDs, and wrong-channel results.
 - `GET /api/lightious/v1/videos/:id` is device-gated and returns playback
-  metadata only when Focused policy permits that exact video or its whole
-  channel. An exact-video policy overrides the channel default.
-- `GET /api/lightious/v1/history` and
-  `POST /api/lightious/v1/history/:id` use the account associated with the
-  paired device, without exposing an Invidious SID or API token. Focused mode
-  does not expose the account-wide history list and records a watched video
-  only after rechecking that the exact video or its channel is still allowed.
+  metadata only when a saved exact video or whole channel grants access in
+  either mode. Exact-video policy overrides the channel default. Recommended
+  videos are omitted in both modes.
+- `POST /api/lightious/v1/history/:id` optionally syncs explicit watched state
+  to the paired account after checking the video's current curated grant.
+  The client tracks manual completion locally even when account sync is off.
 - `GET /api/lightious/v1/media` accepts only a short-lived signed media
   capability minted by the metadata endpoint. The capability is scoped to one
   device, video, canonical channel, stream type, source, and expiry. Each range
-  request rechecks device revocation and current Focused policy. This URL-based
+  request rechecks device revocation and current curated policy. This URL-based
   capability is required because detached LightAudio playback cannot attach an
   authorization header; the long-lived device bearer is never placed in a URL.
 
@@ -254,11 +270,10 @@ list as unsupported and may refetch metadata after a source expires.
    playlist destinations, playlist search, and channel browsing across uploads,
    livestreams, and channel-local search. Shorts are explicitly excluded.
    **Implemented; the companion never links to a player.**
-5. Focused Videos, Channels, and Playlists phone views with compact policy
-   filters, unified local library search, full-catalog channel search,
-   player-style audio, native-aspect video, fullscreen playback, and paginated
-   whole-channel uploads and streams. Shorts are explicitly excluded.
-   **Implemented in the Kotlin client and paired server API.**
+5. Focused finite channel feed and Library browsing, with saved Videos and
+   Playlists in both modes. Manual watched completion, quiet playback endings,
+   and position-preserving Watch/Listen handoff are implemented in the client.
+   The server provides configurable recent windows and curated access in both modes.
 6. Optional custom-instance provider.
 
 The Kotlin client remains a clean Light SDK application. This server-side fork

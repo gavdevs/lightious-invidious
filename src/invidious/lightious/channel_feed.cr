@@ -8,6 +8,8 @@ module Invidious::Lightious::ChannelFeed
   MAX_CURSOR_BYTES              =     6_000
   MAX_SOURCE_CONTINUATION_BYTES =     5_500
   MAX_SOURCE_OFFSET             = 1_000_000
+  DEFAULT_RECENT_LIMIT          =         3
+  MAX_RECENT_LIMIT              =         5
 
   record Position,
     complete : Bool,
@@ -50,6 +52,42 @@ module Invidious::Lightious::ChannelFeed
     end
   end
 
+  # Only public channel metadata is cached, before profile limits, quarantine,
+  # or watched filtering. Both memory and freshness are bounded. Failed fetches
+  # never enter this cache, so a retry can recover immediately.
+  class RecentCache
+    private record CachedPage, entries : Array(Entry), stored_at : Time::Span
+
+    @pages = {} of String => CachedPage
+    @mutex = Mutex.new
+
+    def initialize(@max_channels : Int32 = 256, @ttl : Time::Span = 5.minutes)
+      raise ArgumentError.new("max_channels must be positive") unless @max_channels > 0
+      raise ArgumentError.new("ttl must be positive") unless @ttl > Time::Span.zero
+    end
+
+    def get(channel_id : String, now : Time::Span = Time.monotonic) : Array(Entry)?
+      @mutex.synchronize do
+        if page = @pages[channel_id]?
+          return page.entries.dup if now - page.stored_at < @ttl
+          @pages.delete(channel_id)
+        end
+        nil
+      end
+    end
+
+    def put(channel_id : String, entries : Array(Entry), now : Time::Span = Time.monotonic) : Nil
+      @mutex.synchronize do
+        @pages.reject! { |_, page| now - page.stored_at >= @ttl }
+        if !@pages.has_key?(channel_id) && @pages.size >= @max_channels
+          oldest = @pages.min_by { |_, page| page.stored_at }.first
+          @pages.delete(oldest)
+        end
+        @pages[channel_id] = CachedPage.new(entries.first(MAX_PAGE_ITEMS), now)
+      end
+    end
+  end
+
   def initial_cursor(has_uploads : Bool, has_streams : Bool) : Cursor
     Cursor.new(
       has_uploads ? Position.initial : Position.finished,
@@ -84,7 +122,7 @@ module Invidious::Lightious::ChannelFeed
     Window.new(start, size, next_position)
   end
 
-  def merge(pages : Array(Array(Entry))) : Array(Entry)
+  def merge(pages : Array(Array(Entry)), limit : Int32 = MAX_PAGE_ITEMS, preserve_order : Bool = false) : Array(Entry)
     by_id = {} of String => Entry
     pages.each do |page|
       page.each do |entry|
@@ -96,10 +134,40 @@ module Invidious::Lightious::ChannelFeed
       end
     end
 
+    source_order = {} of String => Int32
+    by_id.each_key.with_index { |id, index| source_order[id] = index }
     by_id.values.sort! do |left, right|
       published_order = right.published <=> left.published
-      published_order == 0 ? left.id <=> right.id : published_order
-    end.first(MAX_PAGE_ITEMS)
+      tie_order = preserve_order ? source_order[left.id] <=> source_order[right.id] : left.id <=> right.id
+      published_order == 0 ? tie_order : published_order
+    end.first(limit)
+  end
+
+  # Upstream pages are already newest-first. Relative labels such as "one
+  # month ago" are decoded against a new clock value for each item, so later
+  # items can acquire slightly later timestamps. Preserve the source order
+  # rather than promoting older uploads on this parser-induced clock drift.
+  def newest_source(entries : Array(Entry)) : Array(Entry)
+    previous : Time? = nil
+    entries.map do |entry|
+      published = previous.try { |value| Math.min(value, entry.published) } || entry.published
+      previous = published
+      entry.copy_with(published: published)
+    end
+  end
+
+  # A fixed release window, independent of any watched history. Completion is
+  # filtered by the phone afterwards, so finishing a video cannot backfill an
+  # older upload. Callers fetch only the first page of each source.
+  def recent_window(pages : Array(Array(Entry)), limit : Int32) : Array(Entry)
+    merge(pages, preserve_order: true).reject { |entry| entry.live_now || entry.upcoming? }
+      .first(limit.clamp(1, MAX_RECENT_LIMIT))
+  end
+
+  # Keep each channel's already-bounded window. The archive-page limit must
+  # not silently truncate subscriptions when many channels have been saved.
+  def combine_recent(windows : Array(Array(Entry))) : Array(Entry)
+    merge(windows, windows.sum(&.size), preserve_order: true)
   end
 
   def encode(cursor : Cursor) : String

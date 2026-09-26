@@ -1,13 +1,15 @@
 require "spectator"
-require "log"
+require "kemal"
+require "../../../src/invidious/helpers/logger"
 require "db"
 require "pg"
 
-LOGGER = Log.for("lightious-database-integration")
+LOGGER = Invidious::LogHandler.new(IO::Memory.new, LogLevel::Off, use_color: false)
 PG_DB  = DB.open(ENV["LIGHTIOUS_DATABASE_SPEC_URL"])
 
 require "../../../src/invidious/lightious/library_destination"
 require "../../../src/invidious/database/lightious"
+require "../../../src/invidious/database/base"
 
 alias LightiousDatabase = Invidious::Database::Lightious
 alias LightiousDestination = Invidious::Lightious::LibraryDestination
@@ -26,6 +28,100 @@ private def lightious_item_input(id : String, video_id : String)
 end
 
 Spectator.describe Invidious::Database::Lightious do
+  it "upgrades legacy feed settings during ordinary startup and preserves pairings on repeat starts" do
+    # Exercise the actual startup schema path, without --migrate. Roll back the
+    # legacy schema fixture afterwards so other integration fixtures survive.
+    PG_DB.transaction do |transaction|
+      conn = transaction.connection.as(PG::Connection)
+      conn.exec_all <<-SQL
+      ALTER TABLE public.lightious_profiles
+        DROP COLUMN channel_feed_limit,
+        DROP COLUMN hide_watched,
+        DROP CONSTRAINT lightious_profiles_mode_check;
+      ALTER TABLE public.lightious_profiles
+        ALTER COLUMN mode SET DEFAULT 'explore',
+        ADD CONSTRAINT lightious_profiles_mode_check CHECK (mode IN ('explore', 'focused')) NOT VALID;
+      INSERT INTO users (email) VALUES ('lightious-ci-startup-explore'), ('lightious-ci-startup-focused');
+      INSERT INTO lightious_profiles (id, invidious_user_email, mode, revision) VALUES
+        ('ci-startup-explore', 'lightious-ci-startup-explore', 'explore', 7),
+        ('ci-startup-focused', 'lightious-ci-startup-focused', 'focused', 8);
+      INSERT INTO lightious_devices (id, profile_id, bearer_digest, label) VALUES
+        ('ci-startup-device', 'ci-startup-explore', 'ci-startup-device-digest', 'Existing phone');
+      INSERT INTO lightious_pairings (
+        id, user_code_digest, poll_secret_digest, device_bearer_digest, device_label,
+        state, claimed_profile_id, expires_at
+      ) VALUES (
+        'ci-startup-pairing', 'ci-startup-code-digest', 'ci-startup-poll-digest',
+        'ci-startup-pairing-device-digest', 'Pairing phone', 'claimed',
+        'ci-startup-explore', now() + interval '10 minutes'
+      );
+      SQL
+
+      Invidious::Database.ensure_lightious_schema(conn)
+      query = "SELECT mode, revision, channel_feed_limit, hide_watched, updated_at FROM lightious_profiles WHERE id = $1"
+      explore = conn.query_one(query, "ci-startup-explore", as: {String, Int64, Int32, Bool, Time})
+      focused = conn.query_one(query, "ci-startup-focused", as: {String, Int64, Int32, Bool, Time})
+      expect({explore[0], explore[1], explore[2], explore[3]}).to eq({"library", 8_i64, 3, true})
+      expect({focused[0], focused[1], focused[2], focused[3]}).to eq({"focused", 8_i64, 3, true})
+      expect(
+        conn.query_one(
+          "SELECT column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'lightious_profiles' AND column_name = 'mode'",
+          as: String,
+        )
+      ).to eq("'focused'::text")
+
+      Invidious::Database.ensure_lightious_schema(conn)
+      expect(conn.query_one(query, "ci-startup-explore", as: {String, Int64, Int32, Bool, Time})).to eq(explore)
+      expect(conn.query_one(query, "ci-startup-focused", as: {String, Int64, Int32, Bool, Time})).to eq(focused)
+
+      conn.exec("UPDATE lightious_profiles SET channel_feed_limit = 5, hide_watched = false WHERE id = 'ci-startup-explore'")
+      library = conn.query_one(query, "ci-startup-explore", as: {String, Int64, Int32, Bool, Time})
+      Invidious::Database.ensure_lightious_schema(conn)
+      expect(conn.query_one(query, "ci-startup-explore", as: {String, Int64, Int32, Bool, Time})).to eq(library)
+      expect(
+        conn.query_one(
+          "SELECT profile_id, bearer_digest, revoked_at IS NULL FROM lightious_devices WHERE id = 'ci-startup-device'",
+          as: {String, String, Bool},
+        )
+      ).to eq({"ci-startup-explore", "ci-startup-device-digest", true})
+      expect(
+        conn.query_one(
+          "SELECT claimed_profile_id, state, poll_secret_digest, device_bearer_digest FROM lightious_pairings WHERE id = 'ci-startup-pairing'",
+          as: {String, String, String, String},
+        )
+      ).to eq({"ci-startup-explore", "claimed", "ci-startup-poll-digest", "ci-startup-pairing-device-digest"})
+      transaction.rollback
+    end
+  end
+
+  it "persists feed settings and revises only changed experience settings" do
+    now = Time.utc
+    account = "lightious-ci-feed-settings"
+    profile_id = "lightious-ci-feed-profile"
+    PG_DB.exec("DELETE FROM users WHERE email = $1", account)
+    begin
+      PG_DB.exec("INSERT INTO users (email) VALUES ($1)", account)
+      profile = described_class.ensure_profile(account, profile_id, now)
+      expect({profile.mode, profile.channel_feed_limit, profile.hide_watched}).to eq({"focused", 3, true})
+
+      unchanged = described_class.update_experience(account, "focused", 3, true, now).not_nil!
+      expect(unchanged.revision).to eq(profile.revision)
+      updated = described_class.update_experience(account, "library", 5, false, now + 1.second).not_nil!
+      expect(updated.revision).to eq(profile.revision + 1)
+      expect({updated.mode, updated.channel_feed_limit, updated.hide_watched}).to eq({"library", 5, false})
+      expect(described_class.profile_for_id(profile_id)).to eq(updated)
+      expect(described_class.profile_for_account(account)).to eq(updated)
+      expect(described_class.ensure_profile(account, "unused-id", now)).to eq(updated)
+
+      expect { described_class.update_experience(account, "explore", 3, true, now) }.to raise_error(PQ::PQError)
+      expect { described_class.update_experience(account, "focused", 0, true, now) }.to raise_error(PQ::PQError)
+      expect { described_class.update_experience(account, "focused", 6, true, now) }.to raise_error(PQ::PQError)
+      expect(described_class.profile_for_id(profile_id)).to eq(updated)
+    ensure
+      PG_DB.exec("DELETE FROM users WHERE email = $1", account)
+    end
+  end
+
   it "keeps library, channel, and playlist organization independent" do
     now = Time.utc
     account = "lightious-ci-data-model"

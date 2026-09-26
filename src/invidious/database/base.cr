@@ -34,30 +34,34 @@ module Invidious::Database
   # even when the expensive general-purpose `check_tables` option is disabled.
   def ensure_lightious_schema
     PG_DB.using_connection do |db_conn|
-      conn = db_conn.as(PG::Connection)
-      conn.exec("SELECT pg_advisory_lock(hashtext('invidious'), hashtext('lightious-schema'))")
+      ensure_lightious_schema(db_conn.as(PG::Connection))
+    end
+  end
 
-      begin
-        ensure_lightious_table(conn, "lightious_profiles")
-        ensure_lightious_profile_mode_default(conn)
-        ensure_lightious_item_library_visibility_column(conn)
-        ensure_lightious_item_short_column(conn)
-        ensure_lightious_table(conn, "lightious_items")
-        ensure_lightious_item_library_visibility(conn)
-        ensure_lightious_item_short_policy(conn)
-        ensure_lightious_item_author_column(conn)
-        backfill_lightious_item_authors(conn)
-        ensure_lightious_item_author_constraint(conn)
+  def ensure_lightious_schema(conn : PG::Connection)
+    conn.exec("SELECT pg_advisory_lock(hashtext('invidious'), hashtext('lightious-schema'))")
 
-        ensure_lightious_table(conn, "lightious_channels")
-        ensure_lightious_table(conn, "lightious_playlists")
-        ensure_lightious_playlist_name_constraint(conn)
-        ensure_lightious_table(conn, "lightious_playlist_items")
-        ensure_lightious_table(conn, "lightious_pairings")
-        ensure_lightious_table(conn, "lightious_devices")
-      ensure
-        conn.exec("SELECT pg_advisory_unlock(hashtext('invidious'), hashtext('lightious-schema'))")
-      end
+    begin
+      ensure_lightious_table(conn, "lightious_profiles")
+      ensure_lightious_profile_mode_default(conn)
+      ensure_lightious_profile_feed_settings(conn)
+      ensure_lightious_item_library_visibility_column(conn)
+      ensure_lightious_item_short_column(conn)
+      ensure_lightious_table(conn, "lightious_items")
+      ensure_lightious_item_library_visibility(conn)
+      ensure_lightious_item_short_policy(conn)
+      ensure_lightious_item_author_column(conn)
+      backfill_lightious_item_authors(conn)
+      ensure_lightious_item_author_constraint(conn)
+
+      ensure_lightious_table(conn, "lightious_channels")
+      ensure_lightious_table(conn, "lightious_playlists")
+      ensure_lightious_playlist_name_constraint(conn)
+      ensure_lightious_table(conn, "lightious_playlist_items")
+      ensure_lightious_table(conn, "lightious_pairings")
+      ensure_lightious_table(conn, "lightious_devices")
+    ensure
+      conn.exec("SELECT pg_advisory_unlock(hashtext('invidious'), hashtext('lightious-schema'))")
     end
   end
 
@@ -72,6 +76,34 @@ module Invidious::Database
     conn.exec <<-SQL
     ALTER TABLE public.lightious_profiles
       ALTER COLUMN mode SET DEFAULT 'focused';
+    SQL
+  end
+
+  private def ensure_lightious_profile_feed_settings(conn : PG::Connection)
+    # Existing installations start without --migrate. Upgrade the profile here
+    # as well as in the versioned migration, under the startup schema lock.
+    # A single statement makes the constraint replacement and mode conversion
+    # atomic; repeated starts preserve settings and do not revise profiles.
+    conn.exec <<-SQL
+    DO $$
+    BEGIN
+      ALTER TABLE public.lightious_profiles
+        ADD COLUMN IF NOT EXISTS channel_feed_limit integer NOT NULL DEFAULT 3,
+        ADD COLUMN IF NOT EXISTS hide_watched boolean NOT NULL DEFAULT true;
+
+      ALTER TABLE public.lightious_profiles
+        DROP CONSTRAINT IF EXISTS lightious_profiles_mode_check,
+        DROP CONSTRAINT IF EXISTS lightious_profiles_channel_feed_limit_check;
+
+      UPDATE public.lightious_profiles
+      SET mode = 'library', revision = revision + 1, updated_at = now()
+      WHERE mode = 'explore';
+
+      ALTER TABLE public.lightious_profiles
+        ADD CONSTRAINT lightious_profiles_mode_check CHECK (mode IN ('library', 'focused')),
+        ADD CONSTRAINT lightious_profiles_channel_feed_limit_check CHECK (channel_feed_limit BETWEEN 1 AND 5);
+    END
+    $$;
     SQL
   end
 

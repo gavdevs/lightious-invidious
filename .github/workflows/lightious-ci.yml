@@ -90,6 +90,11 @@ jobs:
           ALTER TABLE public.lightious_items DROP COLUMN author_ucid;
           ALTER TABLE public.lightious_items DROP COLUMN library_visible;
           ALTER TABLE public.lightious_items DROP COLUMN is_short;
+          ALTER TABLE public.lightious_profiles DROP CONSTRAINT lightious_profiles_mode_check;
+          ALTER TABLE public.lightious_profiles ADD CONSTRAINT lightious_profiles_mode_check
+            CHECK (mode IN ('explore', 'focused'));
+          ALTER TABLE public.lightious_profiles DROP COLUMN channel_feed_limit;
+          ALTER TABLE public.lightious_profiles DROP COLUMN hide_watched;
           ALTER TABLE public.lightious_profiles ALTER COLUMN mode SET DEFAULT 'explore';
 
           INSERT INTO users (email) VALUES ('lightious-ci-upgrade');
@@ -277,8 +282,8 @@ jobs:
               SELECT mode
               FROM lightious_profiles
               WHERE id = 'ci-upgrade-profile'
-            ) IS DISTINCT FROM 'explore' THEN
-              RAISE EXCEPTION 'existing profile mode changed during default upgrade';
+            ) IS DISTINCT FROM 'library' THEN
+              RAISE EXCEPTION 'legacy Explore profile was not migrated to Library';
             END IF;
           END
           $$;
@@ -330,6 +335,8 @@ jobs:
             http://127.0.0.1:3000/api/lightious/v1/sync)"
           jq --exit-status '
             (.mode == "focused") and
+            (.channelFeedLimit == 3) and
+            (.hideWatched == true) and
             (.blockedVideoIds == ["SHORTSYNC01"]) and
             (.items | length == 1) and
             (.items[0].videoId == "dQw4w9WgXcQ") and
@@ -346,6 +353,22 @@ jobs:
             (([.playlists[0].items[].videoId] | sort) ==
               (["M7lc1UVf-VE", "dQw4w9WgXcQ"] | sort))
           ' <<< "$sync_response" > /dev/null
+          # New and legacy phone endpoints keep device authentication and the
+          # curated boundary even when called outside the phone UI.
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            http://127.0.0.1:3000/api/lightious/v1/channel-feed)" = 401
+          for endpoint in feed search popular history channels/UC5H_KXkPbEsGs0tFt8R35mA/videos channels/UC5H_KXkPbEsGs0tFt8R35mA/search; do
+            test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+              --header 'Authorization: Bearer lpt_device_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' \
+              "http://127.0.0.1:3000/api/lightious/v1/$endpoint")" = 403
+          done
+          psql --set ON_ERROR_STOP=1 -c "UPDATE lightious_profiles SET mode = 'library' WHERE id = 'ci-profile'"
+          for endpoint in feed search popular history channels/UCTTTTTTTTTTTTTTTTTTTTTT/videos channels/UCTTTTTTTTTTTTTTTTTTTTTT/search; do
+            test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+              --header 'Authorization: Bearer lpt_device_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' \
+              "http://127.0.0.1:3000/api/lightious/v1/$endpoint")" = 403
+          done
+          psql --set ON_ERROR_STOP=1 -c "UPDATE lightious_profiles SET mode = 'focused' WHERE id = 'ci-profile'"
           crystal spec spec/invidious/lightious/database_integration_check.cr
           response="$(curl --fail --silent --show-error \
             --request POST \

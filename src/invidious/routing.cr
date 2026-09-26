@@ -371,6 +371,7 @@ module Invidious::Routing
     post "/api/lightious/v1/pairings/:id/activate", Routes::API::Lightious::V1, :activate_pairing
     get "/api/lightious/v1/sync", Routes::API::Lightious::V1, :sync
     get "/api/lightious/v1/feed", Routes::API::Lightious::V1, :feed
+    get "/api/lightious/v1/channel-feed", Routes::API::Lightious::V1, :channel_feed
     get "/api/lightious/v1/history", Routes::API::Lightious::V1, :history
     post "/api/lightious/v1/history/:id", Routes::API::Lightious::V1, :mark_watched
     get "/api/lightious/v1/popular", Routes::API::Lightious::V1, :popular

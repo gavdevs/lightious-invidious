@@ -14,7 +14,7 @@
         <dl class="lightious-stats" aria-label="Phone settings summary">
             <div class="lightious-stat">
                 <dt>Experience</dt>
-                <dd><%= profile.mode == "focused" ? "Focused" : "Explore" %></dd>
+                <dd><%= profile.mode == "focused" ? "Focused" : "Library" %></dd>
             </div>
             <div class="lightious-stat">
                 <dt>Phones</dt>
@@ -46,19 +46,33 @@
                         <label class="lightious-mode-option">
                             <span class="lightious-mode-copy">
                                 <strong>Focused</strong>
-                                <span>Only the videos, channels, and playlists chosen in Library appear on the phone.</span>
+                                <span>A finite feed of recent releases from your saved channels, alongside your saved videos and playlists. No channel archives or channel search.</span>
                             </span>
                             <input type="radio" name="mode" value="focused" <% if profile.mode == "focused" %>checked<% end %>>
                         </label>
                         <label class="lightious-mode-option">
                             <span class="lightious-mode-copy">
-                                <strong>Explore</strong>
-                                <span>Allow search, feeds, and local history on the phone.</span>
+                                <strong>Library</strong>
+                                <span>Browse and search the full archives of your saved channels, alongside your saved videos and playlists.</span>
                             </span>
-                            <input type="radio" name="mode" value="explore" <% if profile.mode == "explore" %>checked<% end %>>
+                            <input type="radio" name="mode" value="library" <% if profile.mode == "library" %>checked<% end %>>
                         </label>
                     </div>
                 </fieldset>
+                <p class="lightious-section-copy">Both experiences stay within the library you choose here.</p>
+                <label for="channel-feed-limit">Recent videos per channel in Focused</label>
+                <select id="channel-feed-limit" name="channel_feed_limit">
+                    <% (1..5).each do |limit| %>
+                        <option value="<%= limit %>" <% if profile.channel_feed_limit == limit %>selected<% end %>><%= limit %></option>
+                    <% end %>
+                </select>
+                <label class="lightious-mode-option">
+                    <span class="lightious-mode-copy">
+                        <strong>Hide watched videos from the Focused feed</strong>
+                        <span>Uses videos you manually mark watched on that phone. Older uploads do not move in to replace them.</span>
+                    </span>
+                    <input type="checkbox" name="hide_watched" value="true" <% if profile.hide_watched %>checked<% end %>>
+                </label>
                 <input type="hidden" name="csrf_token" value="<%= HTML.escape(csrf_token) %>">
                 <div class="lightious-section-actions">
                     <button class="lightious-action" type="submit">Save experience</button>

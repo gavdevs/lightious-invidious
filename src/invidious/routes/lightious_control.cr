@@ -4,7 +4,7 @@ module Invidious::Routes::LightiousControl
   extend self
 
   CSRF_SCOPE              = {"POST:lightious/*"}
-  MODES                   = {"explore", "focused"}
+  MODES                   = {"library", "focused"}
   POLICIES                = {"listen_only", "watch_and_listen"}
   SEARCH_TYPES            = {"all", "video", "channel"}
   MAX_SEARCH_QUERY_BYTES  = 256
@@ -752,9 +752,17 @@ module Invidious::Routes::LightiousControl
     end
 
     mode = env.params.body["mode"]?.to_s
-    return error_template(400, "Choose Explore or Focused mode.") unless MODES.includes?(mode)
+    return error_template(400, "Choose Library or Focused mode.") unless MODES.includes?(mode)
 
-    profile = Invidious::Database::Lightious.update_mode(user.email, mode, Time.utc)
+    limit = env.params.body["channel_feed_limit"]?.try(&.to_i?)
+    unless limit && limit.in?(1..Invidious::Lightious::ChannelFeed::MAX_RECENT_LIMIT)
+      return error_template(400, "Choose between 1 and 5 recent videos per channel.")
+    end
+    hide_watched = env.params.body["hide_watched"]? == "true"
+
+    profile = Invidious::Database::Lightious.update_experience(
+      user.email, mode, limit, hide_watched, Time.utc,
+    )
     return error_template(404, "Lightious profile not found.") unless profile
 
     env.redirect "/lightious?notice=mode"

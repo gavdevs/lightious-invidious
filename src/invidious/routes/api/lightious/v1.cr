@@ -5,6 +5,7 @@ module Invidious::Routes::API::Lightious::V1
   MAX_CHANNEL_SEARCH_QUERY_BYTES =  256
   MAX_CHANNEL_SEARCH_PAGE        =   50
   CHANNEL_SEARCH_PAGE_SIZE       =   20
+  RECENT_CHANNEL_CACHE           = Invidious::Lightious::ChannelFeed::RecentCache.new
 
   def create_pairing(env)
     prepare_json(env)
@@ -139,6 +140,8 @@ module Invidious::Routes::API::Lightious::V1
         json.field "account", Invidious::Lightious::Pairing.account_display(profile.account)
         json.field "revision", profile.revision
         json.field "mode", profile.mode
+        json.field "channelFeedLimit", profile.channel_feed_limit
+        json.field "hideWatched", profile.hide_watched
         json.field "blockedVideoIds", blocked_video_ids
         json.field "items" do
           json.array do
@@ -191,65 +194,14 @@ module Invidious::Routes::API::Lightious::V1
     prepare_json(env)
     device, profile = authenticated_context(env)
     return invalid_device(env) unless device && profile
-    return focused_endpoint_denied(env) if profile.mode == "focused"
-
-    user = Invidious::Database::Users.select(email: device.account)
-    return invalid_device(env) unless user
-
-    env.set "user", user
-    Invidious::Database::Lightious.touch_device(device.id, Time.utc)
-
-    locale = env.get("preferences").as(Preferences).locale
-    max_results = env.params.query["max_results"]?.try(&.to_i?)
-    max_results ||= user.preferences.max_results
-    max_results ||= CONFIG.default_user_preferences.max_results
-    page = env.params.query["page"]?.try(&.to_i?) || 1
-    videos, notifications = get_subscription_feed(user, max_results, page)
-
-    JSON.build do |json|
-      json.object do
-        json.field "notifications" do
-          json.array do
-            notifications.each do |video|
-              video.to_json(locale, json) if safe_channel_video?(video, profile)
-            end
-          end
-        end
-        json.field "videos" do
-          json.array do
-            videos.each do |video|
-              video.to_json(locale, json) if safe_channel_video?(video, profile)
-            end
-          end
-        end
-      end
-    end
+    error_json(403, "Open discovery is no longer available in Lightious.")
   end
 
   def history(env)
     prepare_json(env)
     device, profile = authenticated_context(env)
     return invalid_device(env) unless device && profile
-    return focused_endpoint_denied(env) if profile.mode == "focused"
-
-    user = Invidious::Database::Users.select(email: device.account)
-    return invalid_device(env) unless user
-
-    max_results = env.params.query["max_results"]?.try(&.to_i?).try(&.clamp(0, MAX_ITEMS_PER_PAGE))
-    max_results ||= user.preferences.max_results
-    max_results ||= CONFIG.default_user_preferences.max_results
-    page = env.params.query["page"]?.try(&.to_i?).try(&.clamp(1, Int32::MAX)) || 1
-    start_index = (page - 1) * max_results
-    reverse_history = user.watched.reverse
-    watched = if reverse_history[start_index]?
-                reverse_history[start_index, max_results]
-              else
-                [] of String
-              end
-    watched = watched.select { |id| safe_video_id?(id, profile) }
-
-    Invidious::Database::Lightious.touch_device(device.id, Time.utc)
-    watched.to_json
+    error_json(403, "Open discovery is no longer available in Lightious.")
   end
 
   def mark_watched(env)
@@ -269,10 +221,8 @@ module Invidious::Routes::API::Lightious::V1
     end
     return short_form_denied(env, profile, video.id) if Invidious::Lightious::ShortsPolicy.short?(video)
 
-    if profile.mode == "focused"
-      policy = playback_policy(profile, video.id, video.ucid)
-      return error_json(403, "This video is not in the Focused library.") unless policy
-    end
+    policy = playback_policy(profile, video.id, video.ucid)
+    return error_json(403, "This video is not in your library.") unless policy
 
     user = Invidious::Database::Users.select(email: device.account)
     return invalid_device(env) unless user
@@ -286,40 +236,82 @@ module Invidious::Routes::API::Lightious::V1
     prepare_json(env)
     device, profile = authenticated_context(env)
     return invalid_device(env) unless device && profile
-    return focused_endpoint_denied(env) if profile.mode == "focused"
-
-    locale = env.get("preferences").as(Preferences).locale
-    Invidious::Database::Lightious.touch_device(device.id, Time.utc)
-    JSON.build do |json|
-      json.array do
-        popular_videos.each do |video|
-          video.to_json(locale, json) if safe_channel_video?(video, profile)
-        end
-      end
-    end
+    error_json(403, "Open discovery is no longer available in Lightious.")
   end
 
   def search(env)
     prepare_json(env)
     device, profile = authenticated_context(env)
     return invalid_device(env) unless device && profile
-    return focused_endpoint_denied(env) if profile.mode == "focused"
+    error_json(403, "Open discovery is no longer available in Lightious.")
+  end
 
-    locale = env.get("preferences").as(Preferences).locale
-    region = env.params.query["region"]?
-    query = Invidious::Search::Query.new(env.params.query, :regular, region)
-    begin
-      search_results = Invidious::Lightious::ShortsPolicy.reject_from(
-        Invidious::Search::Processors.regular(query)
-      )
-    rescue ex
-      return error_json(400, ex)
+  # Each channel contributes a fixed recent-release window. We intentionally
+  # ignore account history here: older clients recorded playback starts there,
+  # while this feed hides only explicit completion recorded by the phone.
+  def channel_feed(env)
+    prepare_json(env)
+    device, profile = authenticated_context(env)
+    return invalid_device(env) unless device && profile
+
+    channels = Invidious::Database::Lightious.channels_for_profile(profile.id)
+    blocked_video_ids = Invidious::Database::Lightious.blocked_video_ids_for_profile(profile.id)
+    windows = [] of Array(Invidious::Lightious::ChannelFeed::Entry)
+    failed_channel_ids = [] of String
+
+    # Two I/O workers keep the first load practical without starting an
+    # unbounded number of simultaneous upstream channel requests.
+    deadline = Time.monotonic + 60.seconds
+    work = ::Channel(String).new(channels.size)
+    results = ::Channel(Tuple(String, Array(Invidious::Lightious::ChannelFeed::Entry)?)).new(channels.size)
+    channels.each { |saved_channel| work.send(saved_channel.ucid) }
+    work.close
+    Math.min(2, channels.size).times do
+      spawn do
+        while ucid = work.receive?
+          break if Time.monotonic >= deadline
+          begin
+            results.send({ucid, recent_channel_entries(ucid)})
+          rescue ex
+            LOGGER.warn("Lightious recent feed could not load #{ucid}: #{ex.message}")
+            results.send({ucid, nil})
+          end
+        end
+      end
     end
+    pending_channel_ids = channels.map(&.ucid)
+    until pending_channel_ids.empty?
+      remaining = deadline - Time.monotonic
+      break if remaining <= Time::Span.zero
+      select
+      when result = results.receive
+        ucid, page = result
+        pending_channel_ids.delete(ucid)
+        if page
+          eligible = page.reject { |entry| blocked_video_ids.includes?(entry.id) }
+          windows << Invidious::Lightious::ChannelFeed.recent_window([eligible], profile.channel_feed_limit)
+        else
+          failed_channel_ids << ucid
+        end
+      when timeout(remaining)
+        break
+      end
+    end
+    # A slow channel remains explicitly retryable, even if its upstream request
+    # finishes and warms the cache after this response has been returned.
+    failed_channel_ids.concat(pending_channel_ids)
 
+    entries = Invidious::Lightious::ChannelFeed.combine_recent(windows)
     Invidious::Database::Lightious.touch_device(device.id, Time.utc)
+    locale = env.get("preferences").as(Preferences).locale
     JSON.build do |json|
-      json.array do
-        search_results.each { |item| item.to_json(locale, json) }
+      json.object do
+        json.field "videos" do
+          json.array do
+            entries.each { |entry| write_channel_feed_entry(json, entry, locale) }
+          end
+        end
+        json.field "failedChannelIds", failed_channel_ids
       end
     end
   end
@@ -332,9 +324,9 @@ module Invidious::Routes::API::Lightious::V1
     ucid = env.params.url["ucid"]
     return error_json(400, "Invalid channel ID.") unless valid_channel_id?(ucid)
 
-    if profile.mode == "focused" &&
-       !Invidious::Database::Lightious.channel_policy_for(profile.id, ucid)
-      return error_json(403, "This channel is not in the Focused library.")
+    return focused_endpoint_denied(env) unless profile.mode == "library"
+    unless Invidious::Database::Lightious.channel_policy_for(profile.id, ucid)
+      return error_json(403, "This channel is not in your library.")
     end
 
     requested_cursor = nil
@@ -422,9 +414,9 @@ module Invidious::Routes::API::Lightious::V1
     ucid = env.params.url["ucid"]
     return error_json(400, "Invalid channel ID.") unless valid_channel_id?(ucid)
 
-    if profile.mode == "focused" &&
-       !Invidious::Database::Lightious.channel_policy_for(profile.id, ucid)
-      return error_json(403, "This channel is not in the Focused library.")
+    return focused_endpoint_denied(env) unless profile.mode == "library"
+    unless Invidious::Database::Lightious.channel_policy_for(profile.id, ucid)
+      return error_json(403, "This channel is not in your library.")
     end
 
     query_text = env.params.query["q"]?.to_s.strip
@@ -502,7 +494,7 @@ module Invidious::Routes::API::Lightious::V1
     return short_form_denied(env, profile, video.id) if Invidious::Lightious::ShortsPolicy.short?(video)
 
     policy = playback_policy(profile, video.id, video.ucid)
-    return error_json(403, "This video is not in the Focused library.") unless policy
+    return error_json(403, "This video is not in your library.") unless policy
 
     locale = env.get("preferences").as(Preferences).locale
     response = JSON.build do |json|
@@ -516,7 +508,6 @@ module Invidious::Routes::API::Lightious::V1
       video.id,
       video.ucid,
       policy,
-      focused: profile.mode == "focused",
     )
   end
 
@@ -615,6 +606,68 @@ module Invidious::Routes::API::Lightious::V1
         end
       end
       json.field "playbackPolicy", item.playback_policy
+    end
+  end
+
+  private def recent_channel_entries(ucid : String) : Array(Invidious::Lightious::ChannelFeed::Entry)
+    if cached = RECENT_CHANNEL_CACHE.get(ucid)
+      return cached
+    end
+
+    channel = get_about_info(ucid)
+    cursor = Invidious::Lightious::ChannelFeed.initial_cursor(
+      channel.tabs.includes?("videos"),
+      channel.tabs.includes?("streams"),
+    )
+    pages = if channel.is_age_gated
+              [
+                recent_age_gated_source(channel, cursor.uploads, "videos"),
+                recent_age_gated_source(channel, cursor.streams, "streams"),
+              ]
+            else
+              uploads, _ = channel_feed_source(channel, cursor.uploads, "videos")
+              streams, _ = channel_feed_source(channel, cursor.streams, "streams")
+              [uploads, streams].map { |page| Invidious::Lightious::ChannelFeed.newest_source(page) }
+            end
+    entries = Invidious::Lightious::ChannelFeed.merge(pages, preserve_order: true)
+    RECENT_CHANNEL_CACHE.put(ucid, entries)
+    entries
+  end
+
+  private def recent_age_gated_source(
+    channel : AboutChannel,
+    position : Invidious::Lightious::ChannelFeed::Position,
+    source : String,
+  ) : Array(Invidious::Lightious::ChannelFeed::Entry)
+    return [] of Invidious::Lightious::ChannelFeed::Entry if position.complete
+
+    playlist_prefix = source == "streams" ? "UULV" : "UULF"
+    playlist = get_playlist(channel.ucid.sub("UC", playlist_prefix))
+    # PlaylistVideo.published is synthesized as Time.utc by the parser. Resolve
+    # only the bounded head candidates, then use real publication metadata;
+    # never sort or refill the feed using that fabricated playlist timestamp.
+    candidates = get_playlist_videos(playlist, offset: 0)
+      .first(Invidious::Lightious::ChannelFeed::MAX_RECENT_LIMIT)
+    candidates.compact_map do |item|
+      next unless item.is_a?(PlaylistVideo)
+      video = get_video(item.id)
+      next unless video.ucid == channel.ucid
+      next if Invidious::Lightious::ShortsPolicy.short?(video)
+      next if video.live_now || video.premiere_timestamp
+      raw_published = video.info["published"]?.try(&.as_s?)
+      raise InfoException.new("Publication date unavailable for recent channel video.") unless raw_published
+      published = Time.parse(raw_published, "%Y-%m-%d", Time::Location::UTC)
+      Invidious::Lightious::ChannelFeed::Entry.new(
+        id: video.id,
+        title: video.title,
+        author: video.author,
+        author_id: video.ucid,
+        published: published,
+        views: video.views,
+        length_seconds: video.length_seconds,
+        premiere_timestamp: nil,
+        live_now: false,
+      )
     end
   end
 
@@ -811,8 +864,6 @@ module Invidious::Routes::API::Lightious::V1
     video_id : String,
     author_ucid : String?,
   ) : String?
-    return "watch_and_listen" if profile.mode == "explore"
-
     Invidious::Database::Lightious.playback_policy_for(
       profile.id,
       video_id,
@@ -826,8 +877,6 @@ module Invidious::Routes::API::Lightious::V1
     video_id : String,
     author_ucid : String?,
     policy : String,
-    *,
-    focused : Bool,
   ) : String
     payload = JSON.parse(response)
     object = payload.as_h
@@ -835,7 +884,7 @@ module Invidious::Routes::API::Lightious::V1
     object.delete("hlsUrl")
     object.delete("dashUrl")
     object.delete("captions")
-    object.delete("recommendedVideos") if focused
+    object.delete("recommendedVideos")
 
     protect_format_array(object, "formatStreams", "muxed", device, video_id, author_ucid, policy)
     protect_format_array(object, "adaptiveFormats", nil, device, video_id, author_ucid, policy)

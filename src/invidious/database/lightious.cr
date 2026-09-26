@@ -9,7 +9,9 @@ module Invidious::Database::Lightious
     mode : String,
     revision : Int64,
     created_at : Time,
-    updated_at : Time
+    updated_at : Time,
+    channel_feed_limit : Int32 = 3,
+    hide_watched : Bool = true
 
   record PairingStatus,
     id : String,
@@ -84,7 +86,7 @@ module Invidious::Database::Lightious
       ) VALUES ($1, $2, $3, $3)
       ON CONFLICT (invidious_user_email) DO UPDATE
         SET invidious_user_email = EXCLUDED.invidious_user_email
-      RETURNING id, invidious_user_email, mode, revision, created_at, updated_at
+      RETURNING id, invidious_user_email, mode, revision, created_at, updated_at, channel_feed_limit, hide_watched
     SQL
 
     row = PG_DB.query_one(
@@ -92,14 +94,14 @@ module Invidious::Database::Lightious
       proposed_id,
       account,
       now,
-      as: {String, String, String, Int64, Time, Time},
+      as: {String, String, String, Int64, Time, Time, Int32, Bool},
     )
     profile_from_row(row)
   end
 
   def profile_for_account(account : String) : Profile?
     request = <<-SQL
-      SELECT id, invidious_user_email, mode, revision, created_at, updated_at
+      SELECT id, invidious_user_email, mode, revision, created_at, updated_at, channel_feed_limit, hide_watched
       FROM lightious_profiles
       WHERE invidious_user_email = $1
     SQL
@@ -107,14 +109,14 @@ module Invidious::Database::Lightious
     row = PG_DB.query_one?(
       request,
       account,
-      as: {String, String, String, Int64, Time, Time},
+      as: {String, String, String, Int64, Time, Time, Int32, Bool},
     )
     row.try { |value| profile_from_row(value) }
   end
 
   def profile_for_id(id : String) : Profile?
     request = <<-SQL
-      SELECT id, invidious_user_email, mode, revision, created_at, updated_at
+      SELECT id, invidious_user_email, mode, revision, created_at, updated_at, channel_feed_limit, hide_watched
       FROM lightious_profiles
       WHERE id = $1
     SQL
@@ -122,28 +124,40 @@ module Invidious::Database::Lightious
     row = PG_DB.query_one?(
       request,
       id,
-      as: {String, String, String, Int64, Time, Time},
+      as: {String, String, String, Int64, Time, Time, Int32, Bool},
     )
     row.try { |value| profile_from_row(value) }
   end
 
-  def update_mode(account : String, mode : String, now : Time) : Profile?
+  def update_experience(
+    account : String,
+    mode : String,
+    channel_feed_limit : Int32,
+    hide_watched : Bool,
+    now : Time,
+  ) : Profile?
     request = <<-SQL
       UPDATE lightious_profiles
       SET
         mode = $1,
-        revision = revision + CASE WHEN mode = $1 THEN 0 ELSE 1 END,
-        updated_at = CASE WHEN mode = $1 THEN updated_at ELSE $2 END
-      WHERE invidious_user_email = $3
-      RETURNING id, invidious_user_email, mode, revision, created_at, updated_at
+        channel_feed_limit = $2,
+        hide_watched = $3,
+        revision = revision + CASE
+          WHEN mode = $1 AND channel_feed_limit = $2 AND hide_watched = $3 THEN 0 ELSE 1 END,
+        updated_at = CASE
+          WHEN mode = $1 AND channel_feed_limit = $2 AND hide_watched = $3 THEN updated_at ELSE $4 END
+      WHERE invidious_user_email = $5
+      RETURNING id, invidious_user_email, mode, revision, created_at, updated_at, channel_feed_limit, hide_watched
     SQL
 
     row = PG_DB.query_one?(
       request,
       mode,
+      channel_feed_limit,
+      hide_watched,
       now,
       account,
-      as: {String, String, String, Int64, Time, Time},
+      as: {String, String, String, Int64, Time, Time, Int32, Bool},
     )
     row.try { |value| profile_from_row(value) }
   end
@@ -1210,7 +1224,7 @@ module Invidious::Database::Lightious
   end
 
   # Exact-video policy wins over a whole-channel default. A nil result means
-  # the focused profile has no grant for this video.
+  # the profile has no grant for this video.
   def playback_policy_for(
     profile_id : String,
     video_id : String,
@@ -1389,7 +1403,7 @@ module Invidious::Database::Lightious
     )
   end
 
-  private def profile_from_row(row : {String, String, String, Int64, Time, Time}) : Profile
+  private def profile_from_row(row : {String, String, String, Int64, Time, Time, Int32, Bool}) : Profile
     Profile.new(
       id: row[0],
       account: row[1],
@@ -1397,6 +1411,8 @@ module Invidious::Database::Lightious
       revision: row[3],
       created_at: row[4],
       updated_at: row[5],
+      channel_feed_limit: row[6],
+      hide_watched: row[7],
     )
   end
 
