@@ -56,7 +56,7 @@ module Invidious::Lightious::ChannelFeed
   # or watched filtering. Both memory and freshness are bounded. Failed fetches
   # never enter this cache, so a retry can recover immediately.
   class RecentCache
-    private record CachedPage, entries : Array(Entry), stored_at : Time::Span
+    private record CachedPage, entries : Array(Entry), stored_at : Time::Instant
 
     @pages = {} of String => CachedPage
     @mutex = Mutex.new
@@ -66,7 +66,7 @@ module Invidious::Lightious::ChannelFeed
       raise ArgumentError.new("ttl must be positive") unless @ttl > Time::Span.zero
     end
 
-    def get(channel_id : String, now : Time::Span = Time.monotonic) : Array(Entry)?
+    def get(channel_id : String, now : Time::Instant = Time.instant) : Array(Entry)?
       @mutex.synchronize do
         if page = @pages[channel_id]?
           return page.entries.dup if now - page.stored_at < @ttl
@@ -76,7 +76,7 @@ module Invidious::Lightious::ChannelFeed
       end
     end
 
-    def put(channel_id : String, entries : Array(Entry), now : Time::Span = Time.monotonic) : Nil
+    def put(channel_id : String, entries : Array(Entry), now : Time::Instant = Time.instant) : Nil
       @mutex.synchronize do
         @pages.reject! { |_, page| now - page.stored_at >= @ttl }
         if !@pages.has_key?(channel_id) && @pages.size >= @max_channels

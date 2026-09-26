@@ -123,25 +123,27 @@ Spectator.describe Invidious::Lightious::ChannelFeed do
 
   it "expires cached channel pages and bounds retained channels" do
     cache = LightiousChannelFeed::RecentCache.new(max_channels: 2, ttl: 5.minutes)
+    start = Time.instant
     page = [ChannelFeedSpecHelpers.entry("one", 100)]
-    cache.put("channel-one", page, 0.seconds)
-    cache.put("channel-two", page, 1.second)
-    cache.put("channel-three", page, 2.seconds)
+    cache.put("channel-one", page, start)
+    cache.put("channel-two", page, start + 1.second)
+    cache.put("channel-three", page, start + 2.seconds)
 
-    expect(cache.get("channel-one", 3.seconds)).to be_nil
-    expect(cache.get("channel-two", 3.seconds)).not_to be_nil
-    expect(cache.get("channel-two", 301.seconds)).to be_nil
-    expect(cache.get("channel-three", 301.seconds)).not_to be_nil
+    expect(cache.get("channel-one", start + 3.seconds)).to be_nil
+    expect(cache.get("channel-two", start + 3.seconds)).not_to be_nil
+    expect(cache.get("channel-two", start + 301.seconds)).to be_nil
+    expect(cache.get("channel-three", start + 301.seconds)).not_to be_nil
   end
 
   it "does not let caller changes mutate the shared cached page" do
     cache = LightiousChannelFeed::RecentCache.new
+    start = Time.instant
     page = [ChannelFeedSpecHelpers.entry("one", 100)]
-    cache.put("channel", page, 0.seconds)
+    cache.put("channel", page, start)
     page.clear
-    cached = cache.get("channel", 1.second).not_nil!
+    cached = cache.get("channel", start + 1.second).not_nil!
     cached.clear
-    expect(cache.get("channel", 2.seconds).not_nil!.map(&.id)).to eq(["one"])
+    expect(cache.get("channel", start + 2.seconds).not_nil!.map(&.id)).to eq(["one"])
   end
 
   it "disables cursor sources when the channel no longer exposes their tabs" do

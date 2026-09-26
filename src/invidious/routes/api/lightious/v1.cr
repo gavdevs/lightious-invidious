@@ -261,7 +261,7 @@ module Invidious::Routes::API::Lightious::V1
 
     # Two I/O workers keep the first load practical without starting an
     # unbounded number of simultaneous upstream channel requests.
-    deadline = Time.monotonic + 60.seconds
+    deadline = Time.instant + 60.seconds
     work = ::Channel(String).new(channels.size)
     results = ::Channel(Tuple(String, Array(Invidious::Lightious::ChannelFeed::Entry)?)).new(channels.size)
     channels.each { |saved_channel| work.send(saved_channel.ucid) }
@@ -269,7 +269,7 @@ module Invidious::Routes::API::Lightious::V1
     Math.min(2, channels.size).times do
       spawn do
         while ucid = work.receive?
-          break if Time.monotonic >= deadline
+          break if Time.instant >= deadline
           begin
             results.send({ucid, recent_channel_entries(ucid)})
           rescue ex
@@ -281,7 +281,7 @@ module Invidious::Routes::API::Lightious::V1
     end
     pending_channel_ids = channels.map(&.ucid)
     until pending_channel_ids.empty?
-      remaining = deadline - Time.monotonic
+      remaining = deadline - Time.instant
       break if remaining <= Time::Span.zero
       select
       when result = results.receive
