@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="18 18 72 72">
+  <title>Lightious</title>
+  <rect x="18" y="18" width="72" height="72" fill="#000000"/>
+  <g fill="none" stroke="#ffffff" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M33,31 V70 Q33,76 39,76 H76"/>
+    <path d="M49,39 L75,53 L49,67 Z"/>
+  </g>
+</svg>

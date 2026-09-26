@@ -191,22 +191,15 @@ html {
 }
 
 .lightious-wordmark-mark {
-  position: relative;
-  width: 15px;
-  height: 25px;
-  border: 2px solid currentColor;
-  border-radius: 4px;
-}
-
-.lightious-wordmark-mark::after {
-  position: absolute;
-  bottom: 3px;
-  left: 50%;
-  width: 4px;
-  height: 2px;
-  background: currentColor;
-  content: "";
-  transform: translateX(-50%);
+  display: block;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .lightious-nav {
@@ -1174,10 +1167,6 @@ html {
 
   .lightious-wordmark {
     flex: 0 0 100%;
-  }
-
-  .lightious-wordmark-mark {
-    display: none;
   }
 
   .lightious-nav {

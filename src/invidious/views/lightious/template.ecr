@@ -25,10 +25,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="<%= theme == "light" ? "#ffffff" : "#000000" %>">
     <%= yield_content "header" %>
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=<%= ASSET_COMMIT %>">
+    <link rel="icon" type="image/svg+xml" sizes="any" href="/lightious-icon.svg?v=<%= ASSET_COMMIT %>">
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png?v=<%= ASSET_COMMIT %>">
     <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png?v=<%= ASSET_COMMIT %>">
+    <link rel="manifest" href="/site.webmanifest?v=<%= ASSET_COMMIT %>">
+    <link rel="mask-icon" href="/safari-pinned-tab.svg?v=<%= ASSET_COMMIT %>" color="#000000">
+    <meta name="msapplication-TileColor" content="#000000">
     <link rel="stylesheet" href="/css/pure-min.css?v=<%= ASSET_COMMIT %>">
-    <link rel="stylesheet" href="/css/lightious.css?v=<%= ASSET_COMMIT %>-companion-8">
+    <link rel="stylesheet" href="/css/lightious.css?v=<%= ASSET_COMMIT %>-companion-10">
 </head>
 <body class="lightious-body lightious-theme-<%= theme %>">
     <a class="lightious-skip-link" href="#lightious-main">Skip to content</a>
@@ -36,7 +41,10 @@
     <div class="lightious-app">
         <header class="lightious-topbar">
             <a class="lightious-wordmark" href="/lightious" aria-label="Lightious companion home">
-                <span class="lightious-wordmark-mark" aria-hidden="true"></span>
+                <svg class="lightious-wordmark-mark" viewBox="27 26 56 56" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                    <path d="M33,31 V70 Q33,76 39,76 H76"></path>
+                    <path d="M49,39 L75,53 L49,67 Z"></path>
+                </svg>
                 <span>Lightious</span>
             </a>
 
